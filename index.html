@@ -1,0 +1,239 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Spotify Playlist Creator</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.3.0/papaparse.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/axios/dist/axios.min.js"></script>
+  </head>
+  <body>
+    <h1>Create Spotify Playlist from CSV</h1>
+    <button id="login">Log in with Spotify</button>
+    <form id="csvForm" style="display: none">
+      <input type="file" id="csvFile" accept=".csv" />
+      <button type="submit">Create Playlist</button>
+    </form>
+    <div id="status"></div>
+    <div id="logContainer">
+      <h2>Logs:</h2>
+      <div id="logs"></div>
+    </div>
+
+    <script>
+      const clientId = "772c5e63e1384b68a3f3333a974b6617";
+      const redirectUri =
+        "https://3bfefecc-53d8-45cb-9f89-718b984e33c1-00-3fqn5xqz8hdp7.kirk.replit.dev/";
+
+      function log(message) {
+        console.log(message);
+        const logContainer = document.getElementById("logs");
+        const logEntry = document.createElement("div");
+        logEntry.textContent = message;
+        logContainer.appendChild(logEntry);
+      }
+
+      document.getElementById("login").addEventListener("click", function () {
+        let state = generateRandomString(16);
+        localStorage.setItem("spotify_auth_state", state);
+        let scope = "playlist-modify-private user-read-private user-read-email";
+        let url = "https://accounts.spotify.com/authorize";
+        url += "?response_type=token";
+        url += "&client_id=" + encodeURIComponent(clientId);
+        url += "&scope=" + encodeURIComponent(scope);
+        url += "&redirect_uri=" + encodeURIComponent(redirectUri);
+        url += "&state=" + encodeURIComponent(state);
+        window.location = url;
+      });
+
+      function generateRandomString(length) {
+        let text = "";
+        let possible =
+          "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+        for (let i = 0; i < length; i++) {
+          text += possible.charAt(Math.floor(Math.random() * possible.length));
+        }
+        return text;
+      }
+
+      if (window.location.hash) {
+        const params = new URLSearchParams(window.location.hash.substr(1));
+        const accessToken = params.get("access_token");
+        const state = params.get("state");
+        if (state === localStorage.getItem("spotify_auth_state")) {
+          localStorage.setItem("spotify_access_token", accessToken);
+          document.getElementById("login").style.display = "none";
+          document.getElementById("csvForm").style.display = "block";
+          log("Successfully logged in with Spotify");
+        } else {
+          log("State mismatch in Spotify auth");
+        }
+      }
+
+      document
+        .getElementById("csvForm")
+        .addEventListener("submit", async function (event) {
+          event.preventDefault();
+          const fileInput = document.getElementById("csvFile");
+          const file = fileInput.files[0];
+          if (file) {
+            const reader = new FileReader();
+            reader.onload = async function (event) {
+              const csvData = event.target.result;
+              log("CSV Data Loaded");
+              await processCSV(csvData);
+            };
+            reader.readAsText(file);
+          } else {
+            document.getElementById("status").textContent =
+              "Please select a CSV file.";
+          }
+        });
+
+      async function processCSV(csvData) {
+        log("Processing CSV Data");
+        const parsedData = Papa.parse(csvData, { header: true }).data;
+
+        // Check for required columns
+        if (
+          !parsedData.length ||
+          !("Artist" in parsedData[0]) ||
+          !("Track" in parsedData[0])
+        ) {
+          throw new Error(
+            "CSV file must contain 'Artist' and 'Track' columns.",
+          );
+        }
+
+        await createSpotifyPlaylist(parsedData);
+      }
+
+      async function createSpotifyPlaylist(tracks) {
+        const accessToken = localStorage.getItem("spotify_access_token");
+        if (!accessToken) {
+          log("No access token found. Please log in.");
+          return;
+        }
+
+        try {
+          const userResponse = await axios.get(
+            "https://api.spotify.com/v1/me",
+            {
+              headers: { Authorization: "Bearer " + accessToken },
+            },
+          );
+          const userId = userResponse.data.id;
+          log("User ID Retrieved: " + userId);
+
+          const playlistResponse = await axios.post(
+            `https://api.spotify.com/v1/users/${userId}/playlists`,
+            {
+              name: "My CSV Playlist",
+              public: false,
+            },
+            {
+              headers: { Authorization: "Bearer " + accessToken },
+            },
+          );
+          const playlistId = playlistResponse.data.id;
+          log("Playlist Created: " + playlistId);
+
+          const trackIds = await getSpotifyIds(accessToken, tracks);
+          if (trackIds.length > 0) {
+            await addTracksToPlaylist(accessToken, playlistId, trackIds);
+            document.getElementById("status").textContent =
+              "Playlist created successfully!";
+            log(
+              "Playlist created successfully with " +
+                trackIds.length +
+                " tracks",
+            );
+          } else {
+            document.getElementById("status").textContent =
+              "No valid tracks found in CSV.";
+            log("No valid tracks found in CSV.");
+          }
+        } catch (error) {
+          log(
+            "Error: " +
+              (error.response
+                ? JSON.stringify(error.response.data)
+                : error.message),
+          );
+          document.getElementById("status").textContent =
+            "Error: " + error.message;
+        }
+      }
+
+      async function getSpotifyId(token, artistName, trackName) {
+        const query = `artist:${artistName} track:${trackName}`;
+        try {
+          const response = await axios.get(
+            "https://api.spotify.com/v1/search",
+            {
+              headers: { Authorization: "Bearer " + token },
+              params: {
+                q: query,
+                type: "track",
+                limit: 1,
+              },
+            },
+          );
+
+          const tracks = response.data.tracks.items;
+          if (tracks && tracks.length > 0) {
+            return tracks[0].id;
+          }
+        } catch (error) {
+          log(
+            `Error searching for ${artistName} - ${trackName}: ${error.message}`,
+          );
+        }
+        return null;
+      }
+
+      async function getSpotifyIds(token, tracks) {
+        const trackIds = [];
+
+        for (const track of tracks) {
+          const artistName = track.Artist ? track.Artist.trim() : "";
+          const trackName = track.Track ? track.Track.trim() : "";
+
+          if (artistName && trackName) {
+            const id = await getSpotifyId(token, artistName, trackName);
+            if (id) {
+              trackIds.push(id);
+              log(`Found ID for: ${artistName} - ${trackName}`);
+            } else {
+              log(`No ID found for: ${artistName} - ${trackName}`);
+            }
+          }
+        }
+
+        return trackIds;
+      }
+
+      async function addTracksToPlaylist(token, playlistId, trackIds) {
+        const chunkSize = 100;
+        for (let i = 0; i < trackIds.length; i += chunkSize) {
+          const chunk = trackIds.slice(i, i + chunkSize);
+          try {
+            await axios.post(
+              `https://api.spotify.com/v1/playlists/${playlistId}/tracks`,
+              {
+                uris: chunk.map((id) => `spotify:track:${id}`),
+              },
+              {
+                headers: { Authorization: "Bearer " + token },
+              },
+            );
+            log(`Added ${chunk.length} tracks to playlist`);
+          } catch (error) {
+            log(`Error adding tracks to playlist: ${error.message}`);
+            throw error;
+          }
+        }
+      }
+    </script>
+  </body>
+</html>
